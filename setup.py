@@ -1,26 +1,35 @@
-# -*- coding: utf-8 -*-
 from setuptools import setup, find_packages
-from pip.req import parse_requirements
-import re, ast
+import ast
+import os
 
-# get version from __version__ variable in pivot_table/__init__.py
-_version_re = re.compile(r'__version__\s+=\s+(.*)')
+# Manually parse requirements.txt
+def parse_requirements(filename):
+    with open(filename, "r") as f:
+        lines = f.readlines()
+    # Remove comments and whitespace
+    return [
+        line.strip().split("#")[0].strip()
+        for line in lines
+        if line.strip() and not line.startswith("#")
+    ]
 
-with open('pivot_table/__init__.py', 'rb') as f:
-    version = str(ast.literal_eval(_version_re.search(
-        f.read().decode('utf-8')).group(1)))
+# Parse requirements
+requirements = parse_requirements("requirements.txt")
 
-requirements = parse_requirements("requirements.txt", session="")
+# Read version from __version__ variable in __init__.py
+version = {}
+with open("pivot_table/__version__.py") as fp:
+    exec(fp.read(), version)
 
 setup(
-	name='pivot_table',
-	version=version,
-	description='Pivot Tables using PivotTable.js',
-	author='vijaywm',
-	author_email='vijay_wm@yahoo.com',
-	packages=find_packages(),
-	zip_safe=False,
-	include_package_data=True,
-	install_requires=[str(ir.req) for ir in requirements],
-	dependency_links=[str(ir._link) for ir in requirements if ir._link]
+    name="pivot_table",
+    version=version["__version__"],
+    author="Your Name",
+    author_email="your@email.com",
+    description="Pivot Table App for Frappe",
+    packages=find_packages(),
+    package_data={"pivot_table": ["public/*"]},
+    include_package_data=True,
+    install_requires=requirements,
+    zip_safe=False,
 )
