@@ -24,8 +24,8 @@ with open("pivot_table/__version__.py") as fp:
 setup(
     name="pivot_table",
     version=version["__version__"],
-    author="Your Name",
-    author_email="your@email.com",
+    author="jamunachi",
+    author_email="jamunachi007@gmail.com",
     description="Pivot Table App for Frappe",
     packages=find_packages(),
     package_data={"pivot_table": ["public/*"]},
