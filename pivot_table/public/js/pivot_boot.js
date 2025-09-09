@@ -1,17 +1,23 @@
-/** pivot_table/public/js/pivot_boot.js (debug-friendly)
+/** pivot_table/public/js/pivot_boot.js
  * Frappe/ERPNext v15
  * - Adds a "Pivot" button to any Query Report
  * - Loads PivotTable.js + jQuery-UI (local first → CDN fallback)
- * - Renders pivot UI (with robust error + empty-data messages)
+ * - Keeps the button alive across toolbar re-renders
+ * - Renders Pivot UI with clear debug/error messages
  */
 (function () {
   const BTN_LABEL = __("Pivot");
   const DIALOG_TITLE = __("Pivot (beta)");
   const MAX_ROWS = 50000;
 
+  // prevent double-load on SPA route changes
   if (window.__frappe_pivot_boot_loaded__) return;
   window.__frappe_pivot_boot_loaded__ = true;
 
+  // --- keep-alive watcher handle ---
+  let __pivotKeepAlive = null;
+
+  // hook into route/async lifecycle
   frappe.router.on("change", attachWhenReady);
   frappe.after_ajax(attachWhenReady);
 
@@ -20,21 +26,30 @@
     return r && r[0] === "query-report" && r[1];
   }
 
+  // Attach once when the Query Report is ready, then keep the button alive
   function attachWhenReady() {
     if (!onQueryReportRoute()) return;
+
     const iv = setInterval(() => {
       if (frappe.query_report && frappe.query_report.page) {
         clearInterval(iv);
-        addButton(frappe.query_report);
+        addButton(frappe.query_report);  // add once
+        ensureKeepAlive();               // keep it alive on re-renders
       }
     }, 150);
+
     setTimeout(() => clearInterval(iv), 4000);
   }
 
+  // Add the Pivot button (idempotent)
   function addButton(report) {
     const page = report.page;
     if (!page || !page.add_inner_button) return;
-    const exists = page.inner_toolbar?.find(".frappe-pivot-btn").length;
+
+    const exists =
+      page.inner_toolbar &&
+      page.inner_toolbar.find &&
+      page.inner_toolbar.find(".frappe-pivot-btn").length;
     if (exists) return;
 
     const $btn = page.add_inner_button(BTN_LABEL, async () => {
@@ -53,13 +68,45 @@
     $btn.addClass("frappe-pivot-btn");
   }
 
-  // ---- dependency loaders ----
+  // Watch for toolbar re-renders and re-add our button if it disappears
+  function ensureKeepAlive() {
+    if (__pivotKeepAlive) {
+      clearInterval(__pivotKeepAlive);
+      __pivotKeepAlive = null;
+    }
+
+    __pivotKeepAlive = setInterval(() => {
+      try {
+        if (!onQueryReportRoute()) {
+          clearInterval(__pivotKeepAlive);
+          __pivotKeepAlive = null;
+          return;
+        }
+        const report = frappe.query_report;
+        if (!report || !report.page) return;
+
+        const page = report.page;
+        const toolbar = page.inner_toolbar || page.wrapper?.find?.(".page-actions");
+        if (!toolbar || !toolbar.length) return;
+
+        if (!toolbar.find(".frappe-pivot-btn").length) {
+          addButton(report);
+        }
+      } catch (e) {
+        console.warn("[pivot] keepalive", e); // non-fatal
+      }
+    }, 700); // light-weight poll
+  }
+
+  // ---------- dependency loaders ----------
   async function ensureDeps() {
+    // Pivot CSS (local first, else CDN)
     await injectCSSWithFallback(
       "/assets/pivot_table/js/lib/pivottable/pivot.min.css",
       "https://cdn.jsdelivr.net/npm/pivottable@2.23.0/dist/pivot.min.css"
     );
 
+    // jQuery-UI (needed for drag/drop in pivotUI)
     if (!(window.jQuery && $.ui && $.ui.sortable && $.ui.draggable && $.ui.droppable)) {
       await injectJSWithFallback(
         "/assets/pivot_table/js/lib/jquery-ui.min.js",
@@ -67,6 +114,7 @@
       );
     }
 
+    // PivotTable.js
     if (!(window.jQuery && $.fn && $.fn.pivotUI)) {
       await injectJSWithFallback(
         "/assets/pivot_table/js/lib/pivottable/pivot.min.js",
@@ -74,7 +122,7 @@
       );
     }
 
-    // final sanity logs (you’ll see these in DevTools console)
+    // Debug sanity logs
     console.log("[pivot] deps", {
       hasJQ: !!window.jQuery,
       hasUI: !!(window.jQuery && $.ui && $.ui.sortable),
@@ -84,7 +132,8 @@
 
   function injectCSSWithFallback(localHref, cdnHref) {
     return new Promise((resolve) => {
-      if (document.querySelector(`link[href="${localHref}"]`) || document.querySelector(`link[href="${cdnHref}"]`)) {
+      if (document.querySelector(`link[href="${localHref}"]`) ||
+          document.querySelector(`link[href="${cdnHref}"]`)) {
         return resolve();
       }
       const link = document.createElement("link");
@@ -96,7 +145,7 @@
         fb.rel = "stylesheet";
         fb.href = cdnHref;
         fb.onload = () => resolve();
-        fb.onerror = () => resolve(); // still allow UI, just unstyled
+        fb.onerror = () => resolve(); // allow unstyled UI
         document.head.appendChild(fb);
       };
       document.head.appendChild(link);
@@ -105,7 +154,8 @@
 
   function injectJSWithFallback(localSrc, cdnSrc) {
     return new Promise((resolve, reject) => {
-      if (document.querySelector(`script[src="${localSrc}"]`) || document.querySelector(`script[src="${cdnSrc}"]`)) {
+      if (document.querySelector(`script[src="${localSrc}"]`) ||
+          document.querySelector(`script[src="${cdnSrc}"]`)) {
         return resolve();
       }
       const s = document.createElement("script");
@@ -122,9 +172,9 @@
     });
   }
 
-  // ---- main flow ----
+  // ---------- main: open the pivot dialog ----------
   async function openPivot(report) {
-    // prepare dialog first (so you see messages even if later steps fail)
+    // Prepare dialog first (so messages show even if later steps fail)
     const dlg = new frappe.ui.Dialog({ title: DIALOG_TITLE, size: "extra-large" });
     dlg.$body.css({ padding: 0 });
     const $wrap = $(
@@ -139,7 +189,7 @@
     const log = (msg) => $("#pivot-log").text(msg);
 
     try {
-      // detect report & filters
+      // report + filters
       const report_name = report.report_name || report.report_doc?.report_name;
       if (!report_name) throw new Error("Cannot detect report name");
 
@@ -150,7 +200,7 @@
 
       log(__("Running report…"));
 
-      // run query report
+      // fetch fresh data
       const { message } = await frappe.call({
         method: "frappe.desk.query_report.run",
         type: "POST",
@@ -162,16 +212,10 @@
 
       console.log("[pivot] report meta", { cols: cols.length, rows: rows.length });
 
-      if (!cols.length) {
-        log(__("No columns returned from the report."));
-        return;
-      }
-      if (!rows.length) {
-        log(__("No data returned for the current filters."));
-        return;
-      }
+      if (!cols.length) { log(__("No columns returned from the report.")); return; }
+      if (!rows.length) { log(__("No data returned for the current filters.")); return; }
 
-      // cap size for responsiveness
+      // cap for responsiveness
       let sliced = rows;
       let clipped = false;
       if (rows.length > MAX_ROWS) {
@@ -197,7 +241,6 @@
       if (clipped) log(__("Showing first {0} rows out of {1}", [MAX_ROWS, rows.length]));
       else log("");
 
-      // final render (guarded)
       if (!($.fn && $.fn.pivotUI)) {
         log(__("Pivot library did not load. (CDN blocked?) Add local files under pivot_table/public/js/lib/… and rebuild."));
         return;
@@ -215,15 +258,3 @@
         aggregatorName: saved.aggregatorName || aggregatorName,
         rendererName: saved.rendererName || "Table",
         onRefresh: function (cfg) {
-          const clean = { ...cfg };
-          delete clean.rendererOptions;
-          delete clean.localeStrings;
-          try { localStorage.setItem(STORE_KEY, JSON.stringify(clean)); } catch {}
-        },
-      });
-    } catch (e) {
-      console.error("[pivot] render error", e);
-      log(__("Pivot failed: {0}", [String(e && e.message || e)]));
-    }
-  }
-})();
