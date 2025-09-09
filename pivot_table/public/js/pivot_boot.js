@@ -55,12 +55,12 @@
   }
 
   async function ensureDeps() {
-    // CSS (Pivot)
+    // CSS (Pivot) — local first, else CDN
     await injectCSSWithFallback(
       "/assets/pivot_table/js/lib/pivottable/pivot.min.css",
       "https://cdn.jsdelivr.net/npm/pivottable@2.23.0/dist/pivot.min.css"
     );
-    // jQuery UI (drag/drop)
+    // jQuery UI (drag/drop) — needed for pivotUI’s DnD
     if (!(window.jQuery && $.ui && $.ui.sortable && $.ui.draggable && $.ui.droppable)) {
       await injectJSWithFallback(
         "/assets/pivot_table/js/lib/jquery-ui.min.js",
