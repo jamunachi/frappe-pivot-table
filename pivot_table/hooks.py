@@ -15,14 +15,12 @@ app_license = "MIT"
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/pivot_table/css/pivot_table.css"
-app_include_css = "/assets/pivot_table/js/lib/pivottable/pivot.min.css"
-# app_include_js = "/assets/pivot_table/js/pivot_table.js"
+app_include_css = []  # CSS is loaded dynamically by pivot_boot.js
+
 app_include_js = [
-    "/assets/pivot_table/js/lib/pivottable/pivot.min.js",
-    "/assets/pivot_table/js/lib/jquery-ui.min.js",
-    "assets/pivot_table/js/query_report_pivot_table.js"
+    "/assets/pivot_table/js/pivot_boot.js",  # single entry point that injects everything
 ]
+
 
 # include js, css files in header of web template
 # web_include_css = "/assets/pivot_table/css/pivot_table.css"
