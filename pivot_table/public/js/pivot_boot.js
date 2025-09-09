@@ -1,9 +1,8 @@
-/** pivot_table/public/js/pivot_boot.js
+/** pivot_table/public/js/pivot_boot.js (debug-friendly)
  * Frappe/ERPNext v15
  * - Adds a "Pivot" button to any Query Report
- * - Re-runs the report with current filters
- * - Loads PivotTable.js + jQuery-UI (local if present → else CDN)
- * - Saves pivot layout per report (localStorage)
+ * - Loads PivotTable.js + jQuery-UI (local first → CDN fallback)
+ * - Renders pivot UI (with robust error + empty-data messages)
  */
 (function () {
   const BTN_LABEL = __("Pivot");
@@ -43,10 +42,10 @@
         await ensureDeps();
         await openPivot(report);
       } catch (err) {
-        console.error("[frappe-pivot-table]", err);
+        console.error("[pivot] fatal", err);
         frappe.msgprint({
           title: __("Pivot Error"),
-          message: __("Unable to open the Pivot UI. Check console for details."),
+          message: __("Unable to open the Pivot UI. See console for details."),
           indicator: "red",
         });
       }
@@ -54,26 +53,33 @@
     $btn.addClass("frappe-pivot-btn");
   }
 
+  // ---- dependency loaders ----
   async function ensureDeps() {
-    // CSS (Pivot) — local first, else CDN
     await injectCSSWithFallback(
       "/assets/pivot_table/js/lib/pivottable/pivot.min.css",
       "https://cdn.jsdelivr.net/npm/pivottable@2.23.0/dist/pivot.min.css"
     );
-    // jQuery UI (drag/drop) — needed for pivotUI’s DnD
+
     if (!(window.jQuery && $.ui && $.ui.sortable && $.ui.draggable && $.ui.droppable)) {
       await injectJSWithFallback(
         "/assets/pivot_table/js/lib/jquery-ui.min.js",
         "https://cdn.jsdelivr.net/npm/jquery-ui@1.13.2/dist/jquery-ui.min.js"
       );
     }
-    // PivotTable.js
+
     if (!(window.jQuery && $.fn && $.fn.pivotUI)) {
       await injectJSWithFallback(
         "/assets/pivot_table/js/lib/pivottable/pivot.min.js",
         "https://cdn.jsdelivr.net/npm/pivottable@2.23.0/dist/pivot.min.js"
       );
     }
+
+    // final sanity logs (you’ll see these in DevTools console)
+    console.log("[pivot] deps", {
+      hasJQ: !!window.jQuery,
+      hasUI: !!(window.jQuery && $.ui && $.ui.sortable),
+      hasPivot: !!(window.jQuery && $.fn && $.fn.pivotUI),
+    });
   }
 
   function injectCSSWithFallback(localHref, cdnHref) {
@@ -90,7 +96,7 @@
         fb.rel = "stylesheet";
         fb.href = cdnHref;
         fb.onload = () => resolve();
-        fb.onerror = () => resolve(); // allow JS to work even if CSS fails
+        fb.onerror = () => resolve(); // still allow UI, just unstyled
         document.head.appendChild(fb);
       };
       document.head.appendChild(link);
@@ -116,87 +122,108 @@
     });
   }
 
+  // ---- main flow ----
   async function openPivot(report) {
-    const report_name = report.report_name || report.report_doc?.report_name;
-    if (!report_name) throw new Error("Cannot detect report name");
-
-    const filters =
-      (report.get_filter_values && report.get_filter_values()) ||
-      (report.get_values && report.get_values()) ||
-      {};
-
-    const { message } = await frappe.call({
-      method: "frappe.desk.query_report.run",
-      type: "POST",
-      args: { report_name, filters },
-    });
-
-    const cols = message?.columns || [];
-    const rows = message?.result || message?.values || [];
-    if (!cols.length) {
-      frappe.msgprint({ message: __("No columns returned from this report."), indicator: "orange" });
-      return;
-    }
-    if (!rows.length) {
-      frappe.msgprint({ message: __("No data for current filters."), indicator: "orange" });
-      return;
-    }
-
-    let clipped = false;
-    let _rows = rows;
-    if (rows.length > MAX_ROWS) {
-      _rows = rows.slice(0, MAX_ROWS);
-      clipped = true;
-    }
-
-    const labels = cols.map((c, i) => c.label || c.fieldname || `Col ${i + 1}`);
-    const data = _rows.map((r) => {
-      const o = {};
-      labels.forEach((k, i) => (o[k] = r[i]));
-      return o;
-    });
-
-    const numericKeys = cols
-      .map((c, i) => ({ key: labels[i], ft: String(c.fieldtype || "").toLowerCase() }))
-      .filter((x) => ["float", "currency", "int", "percent", "duration"].includes(x.ft))
-      .map((x) => x.key);
-
-    const aggregatorName = numericKeys.length ? "Sum" : "Count";
-    const vals = numericKeys.length ? [numericKeys[0]] : [];
-
+    // prepare dialog first (so you see messages even if later steps fail)
     const dlg = new frappe.ui.Dialog({ title: DIALOG_TITLE, size: "extra-large" });
     dlg.$body.css({ padding: 0 });
-
-    const notice = clipped
-      ? `<div style="padding:8px 12px; font-size:12px; color:#666;">
-           ${__("Showing first {0} rows out of {1}", [MAX_ROWS, rows.length])}
-         </div>` : "";
-
     const $wrap = $(
       `<div style="padding:12px;">
-         ${notice}
+         <div id="pivot-log" style="font:12px/1.4 sans-serif; color:#666; margin-bottom:6px;"></div>
          <div id="pivot-target" style="min-height:560px;"></div>
        </div>`
     );
     dlg.$body.append($wrap);
     dlg.show();
 
-    const STORE_KEY = `__pivot_cfg__${report_name}`;
-    let saved = {};
-    try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch {}
+    const log = (msg) => $("#pivot-log").text(msg);
 
-    $("#pivot-target").pivotUI(data, {
-      rows: saved.rows || [],
-      cols: saved.cols || [],
-      vals: saved.vals || vals,
-      aggregatorName: saved.aggregatorName || aggregatorName,
-      rendererName: saved.rendererName || "Table",
-      onRefresh: function (cfg) {
-        const clean = { ...cfg };
-        delete clean.rendererOptions;
-        delete clean.localeStrings;
-        try { localStorage.setItem(STORE_KEY, JSON.stringify(clean)); } catch {}
-      },
-    });
+    try {
+      // detect report & filters
+      const report_name = report.report_name || report.report_doc?.report_name;
+      if (!report_name) throw new Error("Cannot detect report name");
+
+      const filters =
+        (report.get_filter_values && report.get_filter_values()) ||
+        (report.get_values && report.get_values()) ||
+        {};
+
+      log(__("Running report…"));
+
+      // run query report
+      const { message } = await frappe.call({
+        method: "frappe.desk.query_report.run",
+        type: "POST",
+        args: { report_name, filters },
+      });
+
+      const cols = message?.columns || [];
+      const rows = message?.result || message?.values || [];
+
+      console.log("[pivot] report meta", { cols: cols.length, rows: rows.length });
+
+      if (!cols.length) {
+        log(__("No columns returned from the report."));
+        return;
+      }
+      if (!rows.length) {
+        log(__("No data returned for the current filters."));
+        return;
+      }
+
+      // cap size for responsiveness
+      let sliced = rows;
+      let clipped = false;
+      if (rows.length > MAX_ROWS) {
+        sliced = rows.slice(0, MAX_ROWS);
+        clipped = true;
+      }
+
+      const labels = cols.map((c, i) => c.label || c.fieldname || `Col ${i + 1}`);
+      const data = sliced.map((r) => {
+        const o = {};
+        labels.forEach((k, i) => (o[k] = r[i]));
+        return o;
+      });
+
+      const numericKeys = cols
+        .map((c, i) => ({ key: labels[i], ft: String(c.fieldtype || "").toLowerCase() }))
+        .filter((x) => ["float", "currency", "int", "percent", "duration"].includes(x.ft))
+        .map((x) => x.key);
+
+      const aggregatorName = numericKeys.length ? "Sum" : "Count";
+      const vals = numericKeys.length ? [numericKeys[0]] : [];
+
+      if (clipped) log(__("Showing first {0} rows out of {1}", [MAX_ROWS, rows.length]));
+      else log("");
+
+      // final render (guarded)
+      if (!($.fn && $.fn.pivotUI)) {
+        log(__("Pivot library did not load. (CDN blocked?) Add local files under pivot_table/public/js/lib/… and rebuild."));
+        return;
+      }
+
+      // persist layout per report
+      const STORE_KEY = `__pivot_cfg__${report_name}`;
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch {}
+
+      $("#pivot-target").pivotUI(data, {
+        rows: saved.rows || [],
+        cols: saved.cols || [],
+        vals: saved.vals || vals,
+        aggregatorName: saved.aggregatorName || aggregatorName,
+        rendererName: saved.rendererName || "Table",
+        onRefresh: function (cfg) {
+          const clean = { ...cfg };
+          delete clean.rendererOptions;
+          delete clean.localeStrings;
+          try { localStorage.setItem(STORE_KEY, JSON.stringify(clean)); } catch {}
+        },
+      });
+    } catch (e) {
+      console.error("[pivot] render error", e);
+      log(__("Pivot failed: {0}", [String(e && e.message || e)]));
+    }
   }
 })();
