@@ -3,7 +3,8 @@
  * - Adds a "Pivot" button to any Query Report
  * - Loads PivotTable.js + jQuery-UI (local first → CDN fallback)
  * - Keeps the button alive across toolbar re-renders
- * - Handles rows as arrays OR objects; shows debug text instead of a blank UI
+ * - Auto-defaults Rows/Cols/Value + coerces numeric-like strings
+ * - Handles rows as arrays OR objects; shows debug text instead of blank UI
  */
 (function () {
   const BTN_LABEL = __("Pivot");
@@ -109,7 +110,6 @@
         "https://cdn.jsdelivr.net/npm/pivottable@2.23.0/dist/pivot.min.js"
       );
     }
-    // Debug sanity
     console.log("[pivot] deps", {
       hasJQ: !!window.jQuery,
       hasUI: !!(window.jQuery && $.ui && $.ui.sortable),
@@ -161,7 +161,7 @@
 
   // ---------- main ----------
   async function openPivot(report) {
-    // Build dialog up front so messages are visible even on errors
+    // Build dialog first (so messages are visible even on errors)
     const dlg = new frappe.ui.Dialog({ title: DIALOG_TITLE, size: "extra-large" });
     dlg.$body.css({ padding: 0 });
     const $wrap = $(
@@ -208,7 +208,7 @@
       // labels
       const labels = cols.map((c, i) => c.label || c.fieldname || `Col ${i + 1}`);
 
-      // Build array-of-objects for pivot, handling both shapes
+      // Build array-of-objects for pivot, handling both shapes (AoA / AoO)
       let data;
       if (Array.isArray(sliced[0])) {
         data = sliced.map((r) => {
@@ -231,31 +231,58 @@
         return;
       }
 
-      const numericKeys = cols
+      // Determine numeric columns from metadata
+      let numericKeys = cols
         .map((c, i) => ({ key: labels[i], ft: String(c.fieldtype || "").toLowerCase() }))
         .filter((x) => ["float", "currency", "int", "percent", "duration"].includes(x.ft))
         .map((x) => x.key);
 
-      const aggregatorName = numericKeys.length ? "Sum" : "Count";
-      const vals = numericKeys.length ? [numericKeys[0]] : [];
+      // If metadata was ambiguous, infer numerics by peeking at data
+      if (!numericKeys.length && data.length) {
+        const sample = data[0];
+        numericKeys = Object.keys(sample).filter((k) => isNumericLike(sample[k]));
+      }
 
-      if (clipped) log(__("Showing first {0} rows out of {1}", [MAX_ROWS, rows.length])); else log("");
+      // Coerce numeric-like strings to numbers so Sum/Avg work
+      if (numericKeys.length) {
+        data.forEach((row) => {
+          numericKeys.forEach((k) => {
+            const v = row[k];
+            if (typeof v === "string") {
+              const n = parseFloat(v.replace(/[^\d.-]/g, ""));
+              if (!isNaN(n)) row[k] = n;
+            }
+          });
+        });
+      }
+
+      const dimKeys = labels.filter((k) => !numericKeys.includes(k));
+
+      // sensible defaults + respect saved layout if present
+      const STORE_KEY = `__pivot_cfg__${report_name}`;
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch {}
+
+      const rowsDefault = (saved.rows && saved.rows.length) ? saved.rows : (dimKeys[0] ? [dimKeys[0]] : []);
+      const colsDefault = (saved.cols && saved.cols.length) ? saved.cols : (dimKeys[1] ? [dimKeys[1]] : []);
+      const valsDefault = (saved.vals && saved.vals.length) ? saved.vals : (numericKeys[0] ? [numericKeys[0]] : []);
+      const aggregatorDefault = saved.aggregatorName || (numericKeys.length ? "Sum" : "Count");
+      const rendererDefault = saved.rendererName || "Table";
+
+      if (clipped) log(__("Showing first {0} rows out of {1}", [MAX_ROWS, rows.length]));
+      else log("");
 
       if (!($.fn && $.fn.pivotUI)) {
         log(__("Pivot library did not load. (CDN blocked?) Add local files under pivot_table/public/js/lib/ and rebuild."));
         return;
       }
 
-      const STORE_KEY = `__pivot_cfg__${report_name}`;
-      let saved = {};
-      try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch {}
-
       $("#pivot-target").pivotUI(data, {
-        rows: saved.rows || [],
-        cols: saved.cols || [],
-        vals: saved.vals || vals,
-        aggregatorName: saved.aggregatorName || aggregatorName,
-        rendererName: saved.rendererName || "Table",
+        rows: rowsDefault,
+        cols: colsDefault,
+        vals: valsDefault,
+        aggregatorName: aggregatorDefault,
+        rendererName: rendererDefault,
         onRefresh: function (cfg) {
           const clean = { ...cfg };
           delete clean.rendererOptions;
@@ -267,5 +294,12 @@
       console.error("[pivot] render error", e);
       log(__("Pivot failed: {0}", [String(e?.message || e)]));
     }
+  }
+
+  function isNumericLike(v) {
+    if (typeof v === "number") return true;
+    if (typeof v !== "string") return false;
+    const n = parseFloat(v.replace(/[^\d.-]/g, ""));
+    return !isNaN(n);
   }
 })();
